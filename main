@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+
+from datetime import datetime, timezone
+from dateutil import tz
+from scapy.all import *
+from threading import Thread
+from pprint import pprint
+import argparse
+import csv
+import gps
+import os
+import time
+
+# Init tracking table for tracking seen APs and improving results with superior RSSIs
+sessionTracking = {}
+
+# Init gpsData
+gpsData = { "gpsTimestamp": None, "gpsTimestampAge": None, "Longitude": None, "Latitude": None }
+# Longitude/Latitude   The location data received at gpsTimestamp.
+# gpsTimestamp     The timestamp with that Lon / Lat from GPS
+# gpsTimestampAge  The difference in seconds between your host's time and the gpsTimestamp stamp.
+#                      Useful to know if your GPS has lost its lock when writing results.
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--filename",  default='',  help="Enter a relative or full filepath. If not provided a default will be used.")
+parser.add_argument("--interface", default='',  help="Interface of choice")
+parser.add_argument("--disablechannelswitching", default=False, action='store_true', help="Assume another program is already handling channel switching. We're just along for the ride.")
+
+args = parser.parse_args()
+
+# _____                 _   _
+#|  ___|   _ _ __   ___| |_(_) ___  _ __  ___
+#| |_ | | | | '_ \ / __| __| |/ _ \| '_ \/ __|
+#|  _|| |_| | | | | (__| |_| | (_) | | | \__ \
+#|_|   \__,_|_| |_|\___|\__|_|\___/|_| |_|___/
+#
+
+def gpsThread(): # Generate GPS data for other threads.
+  session = gps.gps(mode=gps.WATCH_ENABLE)
+  global gpsData
+
+  while True:
+    while 0 == session.read():
+      if not (gps.MODE_SET & session.valid): continue
+
+      time=lat=lon=None
+
+      if gps.TIME_SET & session.valid:
+        time = session.fix.time
+      else: time = None
+
+      if ((gps.isfinite(session.fix.latitude) and gps.isfinite(session.fix.longitude))):
+        lat = session.fix.latitude
+        lon = session.fix.longitude
+      else:
+        lat=lon=None
+
+      if time and lat and lon:
+        gpsData["gpsTimestamp"] = time
+        gpsData["Latitude"]     = lat
+        gpsData["Longitude"]    = lon
+
+      # Update drift seconds on stored gpsData
+      if gpsData['gpsTimestamp']:
+        gpsTime = datetime.strptime(str(gpsData['gpsTimestamp']),'%Y-%m-%dT%H:%M:%S.%f%z')
+        gpsTime = gpsTime.replace(tzinfo=tz.tzutc()).astimezone(tz=tz.tzlocal())
+        localTime = datetime.now().astimezone()
+        gpsData["gpsTimestampAge"] = ((localTime-gpsTime).total_seconds())
+
+    time.sleep(1) # One second sleep between polls should be fine. Make this a variable however. And add arguments to the script.
+
+def processPacket(packet):
+  global sessionTracking
+
+  try:
+    if packet.haslayer(Dot11Beacon): # If the packet looks good, proceed
+      bssid = packet[Dot11].addr2
+      ssid  = packet[Dot11Elt].info.decode().rstrip('\x00')
+      if len(ssid) == 0: ssid = "<Hidden>"
+      rssi = packet.dBm_AntSignal
+  
+      stats = packet[Dot11Beacon].network_stats()
+      channel  = stats.get("channel")
+      security = ''.join(stats.get("crypto"))
+      
+      # Handle new and seen APs. 
+      # If new:  Add to array.
+      # If seen: Compare RSSI, GPS Coordinates if better.
+      
+      if not bssid in sessionTracking:
+        #print('New: ',bssid, ssid, channel, security,rssi)
+        sessionTracking[bssid] = {}
+        sessionTracking[bssid]["bssid"]     = bssid # Redundant but for CSV export.
+        sessionTracking[bssid]["ssid"]      = ssid
+        sessionTracking[bssid]["rssi"]      = rssi
+        sessionTracking[bssid]["channel"]   = channel
+        sessionTracking[bssid]["security"]  = security
+        sessionTracking[bssid]["gpsTimestamp"]    = gpsData["gpsTimestamp"]
+        sessionTracking[bssid]["Latitude"]        = gpsData["Latitude"]
+        sessionTracking[bssid]["Longitude"]       = gpsData["Longitude"]
+        sessionTracking[bssid]["gpsTimestampAge"] = gpsData["gpsTimestampAge"]
+      elif bssid in sessionTracking:
+        if rssi > sessionTracking[bssid]["rssi"]: # If RSSI improved, update entry.
+          #print('Better: ', bssid, ssid, channel, security,rssi)
+          sessionTracking[bssid]["bssid"]     = bssid
+          sessionTracking[bssid]["rssi"]      = rssi
+          sessionTracking[bssid]["ssid"]      = ssid
+          sessionTracking[bssid]["channel"]   = channel
+          sessionTracking[bssid]["security"]  = security
+          sessionTracking[bssid]["gpsTimestamp"]    = gpsData["gpsTimestamp"]
+          sessionTracking[bssid]["Latitude"]        = gpsData["Latitude"]
+          sessionTracking[bssid]["Longitude"]       = gpsData["Longitude"]
+          sessionTracking[bssid]["gpsTimestampAge"] = gpsData["gpsTimestampAge"]
+
+  except Exception as e: # Ignore busted packets
+    print(e)
+    pass
+
+def snifferThread():
+  sniff(prn=processPacket, iface=interface)
+
+
+def channelSwitcher():
+  print('Channel switching thread started')
+  ch = 1
+  while True:
+    os.system(f"iwconfig {interface} channel {ch}")
+    # switch channel from 1 to 14 each 0.5s
+    ch = ch % 14 + 1
+    time.sleep(0.5)
+
+def waitForGPSLock():
+  print('Waiting for GPS lock...')
+  while True:
+    time.sleep(1)
+    if gpsData["gpsTimestamp"] is not None:
+      print("Got it:" + str(list(gpsData.values())))
+      break
+
+def writeCsv(filename):
+  global sessionTracking
+  global args
+
+  try:
+    firstElement = next(iter(sessionTracking))
+
+    with open(filename, 'w') as csvFile:
+      subKey = list(sessionTracking.keys())[0]
+      w = csv.DictWriter(csvFile, sessionTracking[subKey].keys()) # Use first key as CSV formatter for all keys
+      w = csv.writer(csvFile)
+
+      w.writerow(sessionTracking[firstElement]) # Use the first element as our CSV header key.
+
+      for AP in list(sessionTracking.keys()): # Loop over all APs and write each to the CSV.
+        w.writerow(list(sessionTracking[AP].values()))
+  except:
+    pass
+
+#  ____
+# / ___| ___
+#| |  _ / _ \
+#| |_| | (_) |
+# \____|\___/
+#
+
+# We assume bettercap will handle channel switching.
+
+if __name__ == "__main__":
+
+  if args.interface == '':
+    print('We need a --interface to work with!')
+    parser.print_help()
+    exit(1)
+
+  interface = args.interface
+  gpsThread = Thread(target=gpsThread)
+  gpsThread.daemon = True
+  gpsThread.start()
+
+  waitForGPSLock()
+
+  snifferThread = Thread(target=snifferThread)
+  snifferThread.daemon = True
+  snifferThread.start()
+
+  if not args.disablechannelswitching:
+    channelSwitcher = Thread(target=channelSwitcher)
+    channelSwitcher.daemon = True
+    channelSwitcher.start()
+
+  if args.filename == '':
+    now = datetime.now().strftime("%Y-%m-%d_%H:%M:%S%z")
+    filename = "./wifigps." + now + ".csv"
+    print('Writing to default: ' + filename)
+  else:
+    print('Writing to custom file: ' + args.filename)
+    filename = args.filename
+
+  print('Collecting...')
+
+  while True:
+    time.sleep(1)
+    writeCsv(filename)
