@@ -9,6 +9,7 @@ import argparse
 import csv
 import gps
 import os
+import sqlite3
 import time
 
 # Init tracking table for tracking seen APs and improving results with superior RSSIs
@@ -23,11 +24,75 @@ gpsData = { "gpsTimestamp": None, "gpsTimestampAge": None, "Longitude": None, "L
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--filename",  default='',  help="Enter a relative or full filepath. If not provided a default will be used.")
+parser.add_argument("--dbfile",  default='',  help="Enter a relative or full filepath. If not provided a default will be used.")
 parser.add_argument("--interface", default='',  help="Interface of choice")
 parser.add_argument("--disablechannelswitching", default=False, action='store_true', help="Assume another program is already handling channel switching. We're just along for the ride.")
 
 args = parser.parse_args()
+
+#   ____ _
+#  / ___| | __ _ ___ ___  ___  ___
+# | |   | |/ _` / __/ __|/ _ \/ __|
+# | |___| | (_| \__ \__ \  __/\__ \
+#  \____|_|\__,_|___/___/\___||___/
+#
+
+class Database: # Our database object
+  def __init__(self, databaseFile):
+    try:
+      self.con = sqlite3.connect(databaseFile,check_same_thread=False)
+      self.cur = self.con.cursor()
+        # Create our database and a duplicate for evicted(Deemed less accurate) datapoints
+      self.exec("create table if not exists wifi \
+             (bssid VARCHAR(17),ssid,channel INT,security TEXT,rssi INT,timestamp INT,timestampAge REAL,lat REAL,lon REAL, unique (bssid))")
+      self.exec("create table if not exists wifi_evicted \
+             (bssid VARCHAR(17),ssid,channel INT,security TEXT,rssi INT,timestamp INT,timestampAge REAL,lat REAL,lon REAL)")
+    except Exception as e:
+      print('Failed to prepare Database: ', e)
+    finally:
+      print('Database Connected')
+
+  def exec(self, query):
+    self.cur.execute(query)
+    self.con.commit()
+
+  def checkBssidExists(self,bssid): # Check if we have a point for a given BSSID already.
+    self.exec("select * from wifi where bssid = '%s' limit 1" %(bssid))
+    result = self.cur.fetchone()
+    if result: # Truthy check for whether we got any result at all.
+      #print('BSSID Exists in database already')
+      return True
+    else:
+      #print('BSSID is new')
+      return False
+
+  def checkNewPointBetter(self,bssid,ssid,rssi,channel,security,timestamp,timestampAge,lat,lon): # Check if we're replacing stored data.
+    self.exec("select * from wifi where bssid = '%s' limit 1" %(bssid))
+    stored = self.cur.fetchone()
+    if rssi > stored[2]:
+      #print('rssi improved')
+      return(True)
+    else:
+      #print('No RSSI improvement, leaving alone.')
+      return(False)
+
+  def retirePoint(self,bssid):
+    self.exec("INSERT OR REPLACE INTO wifi_evicted select * from wifi where bssid = '%s'" %(bssid))
+    self.exec("DELETE from wifi where bssid = '%s'" %(bssid))
+
+  def writePoint(self,bssid,ssid,rssi,channel,security,timestamp,timestampAge,lat,lon):
+    self.exec("insert or ignore into wifi values ('%s','%s','%s','%s','%s','%s','%s','%s','%s')" %(bssid,ssid,rssi,channel,security,timestamp,timestampAge,lat,lon))
+
+  def handleWifiPoint(self,bssid,ssid,rssi,channel,security,timestamp,timestampAge,lat,lon):
+    if self.checkBssidExists(bssid):
+        if self.checkNewPointBetter(bssid,ssid,rssi,channel,security,timestamp,timestampAge,lat,lon):
+          self.retirePoint(bssid)
+          self.writePoint(bssid,ssid,rssi,channel,security,timestamp,timestampAge,lat,lon)
+    else:
+      #print('Writing new point: ' + bssid)
+      self.writePoint(bssid,ssid,rssi,channel,security,timestamp,timestampAge,lat,lon)
+
+
 
 # _____                 _   _
 #|  ___|   _ _ __   ___| |_(_) ___  _ __  ___
@@ -35,6 +100,8 @@ args = parser.parse_args()
 #|  _|| |_| | | | | (__| |_| | (_) | | | \__ \
 #|_|   \__,_|_| |_|\___|\__|_|\___/|_| |_|___/
 #
+
+
 
 def gpsThread(): # Generate GPS data for other threads.
   session = gps.gps(mode=gps.WATCH_ENABLE)
@@ -90,28 +157,8 @@ def processPacket(packet):
       
       if not bssid in sessionTracking:
         #print('New: ',bssid, ssid, channel, security,rssi)
-        sessionTracking[bssid] = {}
-        sessionTracking[bssid]["bssid"]     = bssid # Redundant but for CSV export.
-        sessionTracking[bssid]["ssid"]      = ssid
-        sessionTracking[bssid]["rssi"]      = rssi
-        sessionTracking[bssid]["channel"]   = channel
-        sessionTracking[bssid]["security"]  = security
-        sessionTracking[bssid]["gpsTimestamp"]    = gpsData["gpsTimestamp"]
-        sessionTracking[bssid]["Latitude"]        = gpsData["Latitude"]
-        sessionTracking[bssid]["Longitude"]       = gpsData["Longitude"]
-        sessionTracking[bssid]["gpsTimestampAge"] = gpsData["gpsTimestampAge"]
-      elif bssid in sessionTracking:
-        if rssi > sessionTracking[bssid]["rssi"]: # If RSSI improved, update entry.
-          #print('Better: ', bssid, ssid, channel, security,rssi)
-          sessionTracking[bssid]["bssid"]     = bssid
-          sessionTracking[bssid]["rssi"]      = rssi
-          sessionTracking[bssid]["ssid"]      = ssid
-          sessionTracking[bssid]["channel"]   = channel
-          sessionTracking[bssid]["security"]  = security
-          sessionTracking[bssid]["gpsTimestamp"]    = gpsData["gpsTimestamp"]
-          sessionTracking[bssid]["Latitude"]        = gpsData["Latitude"]
-          sessionTracking[bssid]["Longitude"]       = gpsData["Longitude"]
-          sessionTracking[bssid]["gpsTimestampAge"] = gpsData["gpsTimestampAge"]
+        db.handleWifiPoint(bssid,ssid,rssi,channel,security,gpsData['gpsTimestamp'],gpsData['gpsTimestampAge'],gpsData['Latitude'],gpsData['Longitude'])
+
 
   except Exception as e: # Ignore busted packets
     print(e)
@@ -128,7 +175,7 @@ def channelSwitcher():
     os.system(f"iwconfig {interface} channel {ch}")
     # switch channel from 1 to 14 each 0.5s
     ch = ch % 14 + 1
-    time.sleep(0.5)
+    time.sleep(0.25)
 
 def waitForGPSLock():
   print('Waiting for GPS lock...')
@@ -138,14 +185,14 @@ def waitForGPSLock():
       print("Got it:" + str(list(gpsData.values())))
       break
 
-def writeCsv(filename):
+def writeCsv(dbfile):
   global sessionTracking
   global args
 
   try:
     firstElement = next(iter(sessionTracking))
 
-    with open(filename, 'w') as csvFile:
+    with open(dbfile, 'w') as csvFile:
       subKey = list(sessionTracking.keys())[0]
       w = csv.DictWriter(csvFile, sessionTracking[subKey].keys()) # Use first key as CSV formatter for all keys
       w = csv.writer(csvFile)
@@ -167,11 +214,15 @@ def writeCsv(filename):
 # We assume bettercap will handle channel switching.
 
 if __name__ == "__main__":
+  scriptRoot = os.path.dirname(os.path.realpath(__file__))
+  databaseFile = scriptRoot + '/wifi.db'
 
   if args.interface == '':
     print('We need a --interface to work with!')
     parser.print_help()
     exit(1)
+
+  db = Database(databaseFile)
 
   interface = args.interface
   gpsThread = Thread(target=gpsThread)
@@ -189,16 +240,15 @@ if __name__ == "__main__":
     channelSwitcher.daemon = True
     channelSwitcher.start()
 
-  if args.filename == '':
+  if args.dbfile == '':
     now = datetime.now().strftime("%Y-%m-%d_%H:%M:%S%z")
-    filename = "./wifigps." + now + ".csv"
-    print('Writing to default: ' + filename)
+    dbfile = "./wifigps." + now + ".csv"
+    print('Writing to default: ' + dbfile)
   else:
-    print('Writing to custom file: ' + args.filename)
-    filename = args.filename
+    print('Writing to custom file: ' + args.dbfile)
+    dbfile = args.dbfile
 
   print('Collecting...')
 
   while True:
-    time.sleep(1)
-    writeCsv(filename)
+    time.sleep(1) # Wait to be killed while threads work their magic.
