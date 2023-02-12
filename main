@@ -30,6 +30,7 @@ parser.add_argument("--disablechannelswitching", default=False, action='store_tr
 parser.add_argument("--importcsv", default='', help="CSV file to import")
 parser.add_argument("--exportcsv", default='', help="CSV filename to export with. If --google used this is a basename and CSVs get saved to your CWD")
 parser.add_argument("--google", default='', action='store_true', help="Break CSV export into multiple files of 2000 data point each. For Google's 'My Maps' which has a 2000-per-csv limit.")
+parser.add_argument("--debug", default='', action='store_true', help="Makes the script print more during runtime.")
 
 args = parser.parse_args()
 
@@ -56,7 +57,7 @@ class Database: # Our database object
       print('Database Connected')
 
   def exec(self, query):
-    #print('DEBUG: This is the query:' + query)
+    #printDebug('DEBUG: This is the query:' + query)
     self.cur.execute(query)
     self.con.commit()
 
@@ -68,18 +69,18 @@ class Database: # Our database object
     self.exec("select * from wifi where bssid = '%s' limit 1" %(bssid))
     result = self.cur.fetchone()
     if result: # Truthy check for whether we got any result at all.
-      #print('BSSID Exists in database already')
+      #printDebug('BSSID Exists in database already')
       return(result)
     else:
-      #print('BSSID is new')
+      #printDebug('BSSID is new')
       return(False)
 
   def checkNewPointBetter(self,storeCheck,bssid,ssid,rssi,channel,security,timestamp,timestampAge,lat,lon): # Check if we're replacing stored data.
     if int(rssi) > storeCheck[2]:
-      #print('rssi improved')
+      #printDebug('RSSI improved')
       return(True)
     else:
-      #print('No RSSI improvement, leaving alone.')
+      #printDebug('No RSSI improvement, leaving alone.')
       return(False)
 
   def retirePoint(self,bssid):
@@ -94,10 +95,11 @@ class Database: # Our database object
     storeCheck = self.checkBssidExists(bssid)
     if storeCheck:
         if self.checkNewPointBetter(storeCheck,bssid,ssid,rssi,channel,security,timestamp,timestampAge,lat,lon):
+          printDebug('Updating point: ' + bssid)
           self.retirePoint(bssid)
           self.writePoint(bssid,ssid,rssi,channel,security,timestamp,timestampAge,lat,lon)
     else:
-      #print('Writing new point: ' + bssid)
+      printDebug('Writing new point: ' + bssid)
       self.writePoint(bssid,ssid,rssi,channel,security,timestamp,timestampAge,lat,lon)
 
 
@@ -108,6 +110,10 @@ class Database: # Our database object
 #|  _|| |_| | | | | (__| |_| | (_) | | | \__ \
 #|_|   \__,_|_| |_|\___|\__|_|\___/|_| |_|___/
 #
+
+def printDebug(content):
+  if args.debug:
+    print('DEBUG: ' + content)
 
 def date2unix(date):
   if type(date) == int: # If already a number, assume it's already a unix timestamp
@@ -160,6 +166,10 @@ def exportCsv(args):
     w = csv.DictWriter(csvFile, headers)
     w = csv.writer(csvFile)
 
+      # We can either select the data out converting the timestamp row (select datetime(timestamp, 'auto')) for example
+      # Or we can take the tuple row here and convert it in python to a local timezone. This would easily specify the +TZ as well.
+      # e.g. date = print(time.replace(tzinfo=tz.tzutc()).astimezone(tz=tz.tzlocal()))
+      # Make a unix2date function?
     w.writerow(headers)   # Write the header
     for row in wifiQuery: # Write the data
       w.writerow(row)
@@ -219,7 +229,7 @@ def processPacket(packet):
       # If seen: Compare RSSI, GPS Coordinates if better.
       
       if not bssid in sessionTracking:
-        #print('New: ',bssid, ssid, channel, security,rssi)
+        #printDebug('New: ',bssid, ssid, channel, security,rssi)
         db.handleWifiPoint(bssid,ssid,rssi,channel,security,gpsData['gpsTimestamp'],gpsData['gpsTimestampAge'],gpsData['Latitude'],gpsData['Longitude'])
 
 
@@ -235,7 +245,7 @@ def channelSwitcher():
   print('Channel switching thread started')
   ch = 1
   while True:
-    os.system(f"iwconfig {interface} channel {ch}")
+    os.system("iwconfig {interface} channel {ch}")
     # switch channel from 1 to 14 each 0.5s
     ch = ch % 14 + 1
     time.sleep(0.25)
@@ -269,6 +279,7 @@ if __name__ == "__main__":
   if args.exportcsv:
     exportCsv(args)
 
+  printDebug('Debugging is enabled.')
 
   if args.interface == '':
     print('We need a --interface to work with!')
