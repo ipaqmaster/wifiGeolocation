@@ -25,10 +25,10 @@ gpsData = { "gpsTimestamp": None, "gpsTimestampAge": None, "Longitude": None, "L
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--dbfile",  default='',  help="Enter a relative or full filepath. If not provided a default will be used.")
 parser.add_argument("--interface", default='',  help="Interface of choice")
 parser.add_argument("--disablechannelswitching", default=False, action='store_true', help="Assume another program is already handling channel switching. We're just along for the ride.")
 parser.add_argument("--importcsv", default='', help="CSV file to import")
+parser.add_argument("--exportcsv", default='', help="CSV filename to export with. If --google used this is a basename and CSVs get saved to your CWD")
 parser.add_argument("--google", default='', action='store_true', help="Break CSV export into multiple files of 2000 data point each. For Google's 'My Maps' which has a 2000-per-csv limit.")
 
 args = parser.parse_args()
@@ -59,6 +59,10 @@ class Database: # Our database object
     #print('DEBUG: This is the query:' + query)
     self.cur.execute(query)
     self.con.commit()
+
+  def execFetchAll(self, query):
+    self.exec(query)
+    return(self.cur.fetchall())
 
   def checkBssidExists(self,bssid): # Check if we have a point for a given BSSID already.
     self.exec("select * from wifi where bssid = '%s' limit 1" %(bssid))
@@ -114,9 +118,9 @@ def date2unix(date):
     except:
       return(False)
     finally:
-      return(result)
+      return(int(result))
 
-def importcsv(args):
+def importCsv(args):
   if os.path.isfile(args.importcsv):
     with open(args.importcsv) as csvfile:
       reader = csv.DictReader(csvfile)
@@ -132,7 +136,7 @@ def importcsv(args):
               print('Failed to convert date...')
               gpsTimestamp = row['gpsTimestamp']
 
-          db.handleWifiPoint(row['bssid'],row['ssid'],row['rssi'],row['channel'],row['security'],row['gpsTimestamp'],row['gpsTimestampAge'],row['Latitude'],row['Longitude'])
+          db.handleWifiPoint(row['bssid'],row['ssid'],row['rssi'],row['channel'],row['security'],gpsTimestamp,row['gpsTimestampAge'],row['Latitude'],row['Longitude'])
 
         else:
           print('Failed to import: ' + row['bssid'] + '/' + row['ssid'] + ' to our database.')
@@ -143,6 +147,24 @@ def importcsv(args):
     exit(1)
 
   exit(0)
+
+def exportCsv(args):
+  headerQuery = db.execFetchAll('PRAGMA table_info(wifi)')
+  headers = []
+  for column in headerQuery: # Put headers together for the csv.
+    headers.append(column[1])
+
+  wifiQuery = db.execFetchAll('select * from wifi')
+
+  with open(args.exportcsv, 'w') as csvFile:
+    w = csv.DictWriter(csvFile, headers)
+    w = csv.writer(csvFile)
+
+    w.writerow(headers)   # Write the header
+    for row in wifiQuery: # Write the data
+      w.writerow(row)
+  exit(0)
+
 
 def gpsThread(): # Generate GPS data for other threads.
   session = gps.gps(mode=gps.WATCH_ENABLE)
@@ -205,8 +227,8 @@ def processPacket(packet):
     print(e)
     pass
 
-def snifferThread():
-  sniff(prn=processPacket, iface=interface)
+def snifferThread(args):
+  sniff(prn=processPacket, iface=args.interface)
 
 
 def channelSwitcher():
@@ -226,25 +248,6 @@ def waitForGPSLock():
       print("Got it:" + str(list(gpsData.values())))
       break
 
-def writeCsv(dbfile):
-  global sessionTracking
-  global args
-
-  try:
-    firstElement = next(iter(sessionTracking))
-
-    with open(dbfile, 'w') as csvFile:
-      subKey = list(sessionTracking.keys())[0]
-      w = csv.DictWriter(csvFile, sessionTracking[subKey].keys()) # Use first key as CSV formatter for all keys
-      w = csv.writer(csvFile)
-
-      w.writerow(sessionTracking[firstElement]) # Use the first element as our CSV header key.
-
-      for AP in list(sessionTracking.keys()): # Loop over all APs and write each to the CSV.
-        w.writerow(list(sessionTracking[AP].values()))
-  except:
-    pass
-
 #  ____
 # / ___| ___
 #| |  _ / _ \
@@ -261,14 +264,17 @@ if __name__ == "__main__":
   db = Database(databaseFile)
 
   if args.importcsv:
-    importcsv(args)
+    importCsv(args)
+
+  if args.exportcsv:
+    exportCsv(args)
+
 
   if args.interface == '':
     print('We need a --interface to work with!')
     parser.print_help()
     exit(1)
 
-  interface = args.interface
   gpsThread = Thread(target=gpsThread)
   gpsThread.daemon = True
   gpsThread.start()
@@ -283,14 +289,6 @@ if __name__ == "__main__":
     channelSwitcher = Thread(target=channelSwitcher)
     channelSwitcher.daemon = True
     channelSwitcher.start()
-
-  if args.dbfile == '':
-    now = datetime.now().strftime("%Y-%m-%d_%H:%M:%S%z")
-    dbfile = "./wifigps." + now + ".csv"
-    print('Writing to default: ' + dbfile)
-  else:
-    print('Writing to custom file: ' + args.dbfile)
-    dbfile = args.dbfile
 
   print('Collecting...')
 
