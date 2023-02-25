@@ -5,6 +5,7 @@ from dateutil import tz
 from scapy.all import *
 from threading import Thread
 from pprint import pprint
+import atexit
 import argparse
 import csv
 import dateutil.parser
@@ -13,23 +14,13 @@ import os
 import sqlite3
 import time
 
-# Init tracking table for tracking seen APs and improving results with superior RSSIs
-sessionTracking = {}
-
-# Init gpsData
-gpsData = { "gpsTimestamp": None, "gpsTimestampAge": None, "Longitude": None, "Latitude": None }
-# Longitude/Latitude   The location data received at gpsTimestamp.
-# gpsTimestamp     The timestamp with that Lon / Lat from GPS
-# gpsTimestampAge  The difference in seconds between your host's time and the gpsTimestamp stamp.
-#                      Useful to know if your GPS has lost its lock when writing results.
-
-
 parser = argparse.ArgumentParser()
 parser.add_argument("--interface", default='',  help="Interface of choice")
 parser.add_argument("--disablechannelswitching", default=False, action='store_true', help="Assume another program is already handling channel switching. We're just along for the ride.")
 parser.add_argument("--importcsv", default='', help="CSV file to import")
 parser.add_argument("--exportcsv", default='', help="CSV filename to export with. If --google used this is a basename and CSVs get saved to your CWD")
 parser.add_argument("--google", default='', action='store_true', help="Break CSV export into multiple files of 2000 data point each. For Google's 'My Maps' which has a 2000-per-csv limit.")
+parser.add_argument("--skipgps", default='', action='store_true', help="Don't wait for GPS info. For developing this script without a GPS present.")
 parser.add_argument("--debug", default='', action='store_true', help="Makes the script print more during runtime.")
 
 args = parser.parse_args()
@@ -88,8 +79,11 @@ class Database: # Our database object
     self.exec("DELETE from wifi where bssid = '%s'" %(bssid))
 
   def writePoint(self,bssid,ssid,rssi,channel,security,timestamp,timestampAge,lat,lon):
-    ssid = ssid.replace("'","''")
-    self.exec("insert or ignore into wifi values ('%s','%s','%s','%s','%s','%s','%s','%s','%s')" %(bssid,ssid,rssi,channel,security,timestamp,timestampAge,lat,lon))
+    if args.skipgps:
+      print('Skipping point write due to --skipgps: ' + bssid + ' ' + ssid)
+    else:
+      ssid = ssid.replace("'","''")
+      self.exec("insert or ignore into wifi values ('%s','%s','%s','%s','%s','%s','%s','%s','%s')" %(bssid,ssid,rssi,channel,security,timestamp,timestampAge,lat,lon))
 
   def handleWifiPoint(self,bssid,ssid,rssi,channel,security,timestamp,timestampAge,lat,lon):
     storeCheck = self.checkBssidExists(bssid)
@@ -110,6 +104,10 @@ class Database: # Our database object
 #|  _|| |_| | | | | (__| |_| | (_) | | | \__ \
 #|_|   \__,_|_| |_|\___|\__|_|\___/|_| |_|___/
 #
+
+def cleanup():
+  print('Cleaning up...')
+  manageInt(args,'managed')
 
 def printDebug(content):
   if args.debug:
@@ -211,8 +209,6 @@ def gpsThread(): # Generate GPS data for other threads.
     time.sleep(1) # One second sleep between polls should be fine. Make this a variable however. And add arguments to the script.
 
 def processPacket(packet):
-  global sessionTracking
-
   try:
     if packet.haslayer(Dot11Beacon): # If the packet looks good, proceed
       bssid = packet[Dot11].addr2
@@ -228,35 +224,70 @@ def processPacket(packet):
       # If new:  Add to array.
       # If seen: Compare RSSI, GPS Coordinates if better.
       
-      if not bssid in sessionTracking:
-        #printDebug('New: ',bssid, ssid, channel, security,rssi)
-        db.handleWifiPoint(bssid,ssid,rssi,channel,security,gpsData['gpsTimestamp'],gpsData['gpsTimestampAge'],gpsData['Latitude'],gpsData['Longitude'])
-
+      #printDebug('Processing: ',bssid, ssid, channel, security,rssi)
+      db.handleWifiPoint(bssid,ssid,rssi,channel,security,gpsData['gpsTimestamp'],gpsData['gpsTimestampAge'],gpsData['Latitude'],gpsData['Longitude'])
 
   except Exception as e: # Ignore busted packets
-    print(e)
+    print('Packet issue: ' + str(e))
     pass
 
-def snifferThread(args):
-  sniff(prn=processPacket, iface=args.interface)
+def executeCmd(cmd):
+  try: 
+    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, shell=True)
+  except subprocess.CalledProcessError as e:
+    print('Command [' + cmd + '] failed: ' + e.stderr.decode("utf-8"))
 
+def manageInt(args,mode):
+  if mode == 'monitor':
+    txmode = 'fixed 3000'
+  elif mode == 'managed':
+    txmode = 'auto'
+
+  try:
+    executeCmd('ip link set ' + args.interface + ' down')
+    executeCmd('iw ' + args.interface + ' set type ' + mode)
+    executeCmd('ip link set ' + args.interface + ' up')
+    # Not all interfaces like being told to go into auto
+    executeCmd('iw ' + args.interface + ' set txpower ' + txmode)
+  except Exception as e:
+    print('Something went wrong prepping interface: ' + args.interface)
+    print(e)
+  finally:
+    print(args.interface + ' is now a ' + mode + ' interface.')
+
+
+def snifferThread(args):
+  try:
+    sniff(prn=processPacket, iface=args.interface)
+  except PermissionError:
+    print('No access to interface ' + args.interface + ' Please give this user access or run the script as root.')
+    exit(1)
+  except Exception as e:
+    print('Interface trouble: ' + str(e))
+    exit(1)
 
 def channelSwitcher():
-  print('Channel switching thread started')
+  print('Channel switching thread started...')
   ch = 1
   while True:
-    os.system("iwconfig {interface} channel {ch}")
-    # switch channel from 1 to 14 each 0.5s
+    executeCmd('iwconfig {interface} channel {ch}'.format(interface = args.interface, ch = ch))
     ch = ch % 14 + 1
     time.sleep(0.25)
 
-def waitForGPSLock():
-  print('Waiting for GPS lock...')
-  while True:
-    time.sleep(1)
-    if gpsData["gpsTimestamp"] is not None:
-      print("Got it:" + str(list(gpsData.values())))
-      break
+def waitForGPSLock(args):
+  if args.skipgps:
+    gpsData['gpsTimestamp']    = 'NA';
+    gpsData['gpsTimestampAge'] = 'NA';
+    gpsData['Latitude']        = 0;
+    gpsData['Longitude']       = 0;
+    print("Skipping GPS wait and setting dummy values: " + str(list(gpsData.values())))
+  else:
+    print('Waiting for GPS lock...')
+    while True:
+      time.sleep(1)
+      if gpsData["gpsTimestamp"] is not None:
+        print("Got it: " + str(list(gpsData.values())))
+        break
 
 #  ____
 # / ___| ___
@@ -264,8 +295,6 @@ def waitForGPSLock():
 #| |_| | (_) |
 # \____|\___/
 #
-
-# We assume bettercap will handle channel switching.
 
 if __name__ == "__main__":
   scriptRoot = os.path.dirname(os.path.realpath(__file__))
@@ -286,22 +315,29 @@ if __name__ == "__main__":
     parser.print_help()
     exit(1)
 
+  # Init gpsData
+  gpsData = { "gpsTimestamp": None, "gpsTimestampAge": None, "Longitude": None, "Latitude": None }
+  # Longitude/Latitude   The location data received at gpsTimestamp.
+  # gpsTimestamp     The timestamp with that Lon / Lat from GPS
+  # gpsTimestampAge  The difference in seconds between your host's time and the gpsTimestamp stamp.
+  #                      Useful to know if your GPS has lost its lock when writing results.
+
   gpsThread = Thread(target=gpsThread)
   gpsThread.daemon = True
   gpsThread.start()
 
-  waitForGPSLock()
+  waitForGPSLock(args)
 
-  snifferThread = Thread(target=snifferThread(args))
-  snifferThread.daemon = True
-  snifferThread.start()
+  manageInt(args,'monitor')
+  atexit.register(cleanup)
 
   if not args.disablechannelswitching:
     channelSwitcher = Thread(target=channelSwitcher)
     channelSwitcher.daemon = True
     channelSwitcher.start()
 
-  print('Collecting...')
+  print('Beginning recon...')
+  snifferThread = Thread(target=snifferThread(args))
+  snifferThread.daemon = True
+  snifferThread.start()
 
-  while True:
-    time.sleep(1) # Wait to be killed while threads work their magic.
