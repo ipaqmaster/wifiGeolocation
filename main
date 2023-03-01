@@ -89,12 +89,12 @@ class Database: # Our database object
     storeCheck = self.checkBssidExists(bssid)
     if storeCheck:
         if self.checkNewPointBetter(storeCheck,bssid,ssid,rssi,channel,security,timestamp,timestampAge,lat,lon):
-          printDebug('Updating point: ' + bssid + ' Staleness: ' + timestampAge)
+          printDebug('Updating point: ' + bssid + ' Staleness: ' + str(timestampAge))
           self.retirePoint(bssid)
           self.writePoint(bssid,ssid,rssi,channel,security,timestamp,timestampAge,lat,lon)
     else:
-      printDebug('Writing new point: ' + bssid + ' Staleness: ' + timestampAge)
-      self.writePoint(bssid,ssid,rssi,channel,security,timestamp,timestampAge,lat,lon)
+        printDebug('Writing new point: ' + bssid + ' Staleness: ' + str(timestampAge))
+        self.writePoint(bssid,ssid,rssi,channel,security,timestamp,timestampAge,lat,lon)
 
 
 
