@@ -16,7 +16,7 @@ import time
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--interface", default='',  help="Interface of choice")
-parser.add_argument("--disablechannelswitching", default=False, action='store_true', help="Assume another program is already handling channel switching. We're just along for the ride.")
+parser.add_argument("--nomanagement", default=False, action='store_true', help="Assume another program is already handling int setup/restoration and channel switching. We're just along for the ride.")
 parser.add_argument("--importcsv", default='', help="CSV file to import")
 parser.add_argument("--exportcsv", default='', help="CSV filename to export with. If --google used this is a basename and CSVs get saved to your CWD")
 parser.add_argument("--google", default='', action='store_true', help="Break CSV export into multiple files of 2000 data point each. For Google's 'My Maps' which has a 2000-per-csv limit.")
@@ -238,6 +238,9 @@ def executeCmd(cmd):
     print('Command [' + cmd + '] failed: ' + e.stderr.decode("utf-8"))
 
 def manageInt(args,mode):
+  if args.nomanagement:
+    print('--nomanagement specified, not touching ' + args.interface)
+    return
   if mode == 'monitor':
     txmode = 'fixed 3000'
   elif mode == 'managed':
@@ -331,7 +334,7 @@ if __name__ == "__main__":
   manageInt(args,'monitor')
   atexit.register(cleanup)
 
-  if not args.disablechannelswitching:
+  if not args.nomanagement:
     channelSwitcher = Thread(target=channelSwitcher)
     channelSwitcher.daemon = True
     channelSwitcher.start()
