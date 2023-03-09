@@ -27,3 +27,5 @@ The script supports a few options to begin with:
 * `--exportcsv` To export your datapoints to a CSV for use elsewhere. Useful for data visualisation platforms such as Elasticsearch (Kibana, Lens) or Google's "My Maps" feature.
 
 * `--google` Optional flag alongside `--exportcsv` to split CSV output to 2000 datapoints per csv file and creates multiple files per 2000 points.
+
+* `--skipgps` Skip GPS requirement. Good for offline testing. (Does not write points to db!)
