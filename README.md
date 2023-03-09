@@ -20,10 +20,10 @@ The script supports a few options to begin with:
 
 * `--debug` To have the script output more information about its activity (Useful for debugging or just keeping an eye on the process)
 
-* `--disablechannelswitching` If you plan to use this script alongside airodump-ng, bettercap or tcpdump with your own channel management method and only want it to come along for the ride without gettng in the way.
+* `--nomanagement` If you plan to use this script alongside airodump-ng, bettercap or tcpdump with your own channel management method and only want it to come along for the ride without gettng in the way.
 
 * `--importcsv` To import any csv data you've exported from the database or created using an earlier version
 
 * `--exportcsv` To export your datapoints to a CSV for use elsewhere. Useful for data visualisation platforms such as Elasticsearch (Kibana, Lens) or Google's "My Maps" feature.
 
-* `--google` **NOT YET FULLY IMPLEMENTED** Optional flag alongside `--exportcsv` to split CSV output to 2000 datapoints per csv file.
+* `--google` Optional flag alongside `--exportcsv` to split CSV output to 2000 datapoints per csv file and creates multiple files per 2000 points.
