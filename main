@@ -45,7 +45,7 @@ class Database: # Our database object
     except Exception as e:
       print('Failed to prepare Database: ', e)
     finally:
-      print('Database Connected')
+      print('Database connected')
 
   def exec(self, query):
     #printDebug('DEBUG: This is the query:' + query)
@@ -132,7 +132,6 @@ def importCsv(args):
         if row['bssid'] and row['ssid'] and row['Latitude'] and row['Longitude']: # Check for these during import at a minimum
 
           print('Importing: ' + row['bssid'] + ' to our database.')
-
           if row['gpsTimestamp']: # Convert the timestamp to UNIX
             try:
               gpsTimestamp = date2unix(row['gpsTimestamp'])
@@ -140,11 +139,20 @@ def importCsv(args):
               print('Failed to convert date...')
               gpsTimestamp = row['gpsTimestamp']
 
-          db.handleWifiPoint(row['bssid'],row['ssid'],row['rssi'],row['channel'],row['security'],gpsTimestamp,row['gpsTimestampAge'],row['Latitude'],row['Longitude'])
+          db.handleWifiPoint(row['bssid'],
+                             row['ssid'],
+                             row['rssi'],
+                             row['channel'],
+                             row['security'],
+                             gpsTimestamp,
+                             row['gpsTimestampAge'],
+                             row['Latitude'],
+                             row['Longitude'])
 
         else:
           print('Failed to import: ' + row['bssid'] + '/' + row['ssid'] + ' to our database.')
-          print('We need at least bssid,ssid,Latitude,Longitide to import to the database. If this datapoint has all of these, please check your CSV has no errors!')
+          print('We need at least bssid,ssid,Latitude,Longitide to import to the database.')
+          print('If this datapoint has all of these, please check your CSV for errors!')
 
   else:
     print('Argument given is not a file')
@@ -152,25 +160,49 @@ def importCsv(args):
 
   exit(0)
 
+def writeFile(filename,headers,items):
+  try:
+    with open(filename, 'w') as csvFile:
+      w = csv.DictWriter(csvFile, headers)
+      w = csv.writer(csvFile)
+
+        # We can either select the data out converting the timestamp row (select datetime(timestamp, 'auto')) for example
+        # Or we can take the tuple row here and convert it in python to a local timezone. This would easily specify the +TZ as well.
+        # e.g. date = print(time.replace(tzinfo=tz.tzutc()).astimezone(tz=tz.tzlocal()))
+        # Make a unix2date function?
+      w.writerow(headers) # Write the header
+      for row in items:
+          # for csv consistency, export SSID as unicode escaped rather than interpreting newlines and linefeed chars literally.
+        row = list(row) # To modify the tuple result
+        row[1] = row[1].encode('unicode_escape')
+        row[1] = row[1].decode('utf-8')
+        w.writerow(row) # Write the data
+  finally:
+    print('Written: ' + filename)
+
 def exportCsv(args):
+  filename = args.exportcsv
   headerQuery = db.execFetchAll('PRAGMA table_info(wifi)')
   headers = []
   for column in headerQuery: # Put headers together for the csv.
     headers.append(column[1])
 
+    # Read out our data into memory
   wifiQuery = db.execFetchAll('select * from wifi')
 
-  with open(args.exportcsv, 'w') as csvFile:
-    w = csv.DictWriter(csvFile, headers)
-    w = csv.writer(csvFile)
+  if args.google: # Limit each csv to 2000 points each.
+    split = 2000
+    wifiQueryCount = len(wifiQuery) - 1
+    iter = 0
+    while iter < wifiQueryCount + split:
+        # Insert an incrementing 'split' number into the desired filename before the suffix for visibility.
+      splitFilename = str('.'.join(filename.split('.')[:-1]) + '-' + str(iter) + '.' + filename.split('.')[-1])
+      print(str(iter) + ':' + str(iter+split))
+      writeFile(splitFilename,headers,wifiQuery[iter:iter+split])
+      iter = iter + split
+  else: # Just write the csv filename specified.
+    writeFile(filename,headers,wifiQuery)
 
-      # We can either select the data out converting the timestamp row (select datetime(timestamp, 'auto')) for example
-      # Or we can take the tuple row here and convert it in python to a local timezone. This would easily specify the +TZ as well.
-      # e.g. date = print(time.replace(tzinfo=tz.tzutc()).astimezone(tz=tz.tzlocal()))
-      # Make a unix2date function?
-    w.writerow(headers)   # Write the header
-    for row in wifiQuery: # Write the data
-      w.writerow(row)
   exit(0)
 
 
@@ -225,7 +257,15 @@ def processPacket(packet):
       # If seen: Compare RSSI, GPS Coordinates if better.
       
       #printDebug('Processing: ',bssid, ssid, channel, security,rssi)
-      db.handleWifiPoint(bssid,ssid,rssi,channel,security,gpsData['gpsTimestamp'],gpsData['gpsTimestampAge'],gpsData['Latitude'],gpsData['Longitude'])
+      db.handleWifiPoint(bssid,
+                         ssid,
+                         rssi,
+                         channel,
+                         security,
+                         gpsData['gpsTimestamp'],
+                         gpsData['gpsTimestampAge'],
+                         gpsData['Latitude'],
+                         gpsData['Longitude'])
 
   except Exception as e: # Ignore busted packets
     print('Packet issue: ' + str(e))
