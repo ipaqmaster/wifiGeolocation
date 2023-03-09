@@ -19,10 +19,8 @@ The script supports a few options to begin with:
 * `--interface` An interface to work with. Required for normal operation.
 
 * `--loglevel #` Optional verbosity. Verbose=1, Debug=2.
-* `--debug`      Quick --loglevel 2
-* `--verbose`    Quick --loglevel 1
-
-* `--debug` To have the script output more information about its activity (Useful for debugging or just keeping an eye on the process)
+* `--debug`      Quick `--loglevel 2` - To have the script output more information about its activity (Useful for debugging or just keeping an eye on the process)
+* `--verbose`    Quick `--loglevel 1`
 
 * `--nomanagement` If you plan to use this script alongside airodump-ng, bettercap or tcpdump with your own channel management method this prevents the script from managing interfaces and channel hopping. Just along for the ride.
 
