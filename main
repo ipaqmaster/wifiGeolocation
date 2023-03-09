@@ -18,6 +18,7 @@ parser = argparse.ArgumentParser()
 
 parser.add_argument("--interface",
                       default='',
+                      required=True,
                       help="Interface of choice")
 parser.add_argument("--nomanagement",
                       default=False,
@@ -37,10 +38,23 @@ parser.add_argument("--skipgps",
                       default='', 
                       action='store_true', 
                       help="Don't wait for GPS info. For developing this script without a GPS present.")
+parser.add_argument("--loglevel",
+                      default=0,
+                      type=int,
+                      help="Optional verbosity. Verbose=1, Debug=2")
 parser.add_argument("--debug",
                       default='',
-                      action='store_true',
-                      help="Makes the script print more during runtime.")
+                      action='store_const',
+                      dest='loglevel',
+                      const=2,
+                      help="Quick --loglevel 2")
+parser.add_argument("--verbose",
+                      default='',
+                      action='store_const',
+                      dest='loglevel',
+                      const=1,
+                      help="Quick --loglevel 1")
+
 
 args = parser.parse_args()
 
@@ -214,7 +228,7 @@ class Database: # Our database object
       print('Database connected')
 
   def exec(self, query):
-    #printDebug('This is the query:' + query)
+    logger('About to execute this query: ' + '[' + query + ']',2)
     self.cur.execute(query)
     self.con.commit()
 
@@ -226,18 +240,18 @@ class Database: # Our database object
     self.exec("select * from wifi where bssid = '%s' limit 1" %(bssid))
     result = self.cur.fetchone()
     if result: # Truthy check for whether we got any result at all.
-      #printDebug('BSSID Exists in database already')
+      logger('BSSID Exists in database already',2)
       return(result)
     else:
-      #printDebug('BSSID is new')
+      logger('BSSID is new',2)
       return(False)
 
   def checkNewPointBetter(self,storeCheck,bssid,ssid,rssi,channel,security,timestamp,timestampAge,lat,lon): # Check if we're replacing stored data.
     if int(rssi) > storeCheck[2]:
-      #printDebug('RSSI improved')
+      logger('RSSI improved',2)
       return(True)
     else:
-      #printDebug('No RSSI improvement, leaving alone.')
+      logger('No RSSI improvement, leaving alone.',2)
       return(False)
 
   def retirePoint(self,bssid):
@@ -255,11 +269,11 @@ class Database: # Our database object
     storeCheck = self.checkBssidExists(bssid)
     if storeCheck:
         if self.checkNewPointBetter(storeCheck,bssid,ssid,rssi,channel,security,timestamp,timestampAge,lat,lon):
-          printDebug('Updating point: ' + bssid + ' Staleness: ' + str(timestampAge))
+          logger('Updating point:\t' + bssid + '\tStaleness:\t' + str(timestampAge), 1)
           self.retirePoint(bssid)
           self.writePoint(bssid,ssid,rssi,channel,security,timestamp,timestampAge,lat,lon)
     else:
-        printDebug('Writing new point: ' + bssid + ' Staleness: ' + str(timestampAge))
+        logger('Writing new point:\t' + bssid + '\tStaleness:\t' + str(timestampAge), 1)
         self.writePoint(bssid,ssid,rssi,channel,security,timestamp,timestampAge,lat,lon)
 
 # _____                 _   _
@@ -273,9 +287,10 @@ def cleanup():
   print('Cleaning up...')
   manageInt(args,'managed')
 
-def printDebug(content):
-  if args.debug:
-    print('DEBUG: ' + content)
+def logger(content,loglevel=0):
+  loglevelString = '[' + ("info", "verbose", "debug")[loglevel] + '] '
+  if loglevel <= args.loglevel:
+    print(loglevelString + content)
 
 def date2unix(date):
   if type(date) == int: # If already a number, assume it's already a unix timestamp
@@ -385,7 +400,7 @@ def processPacket(packet):
       # If new:  Add to array.
       # If seen: Compare RSSI, GPS Coordinates if better.
       
-      #printDebug('Processing: ',bssid, ssid, channel, security,rssi)
+      logger('Processing: ' + bssid + str(ssid) + str(channel) + security + str(rssi),2)
       Db.handleWifiPoint(bssid,
                          ssid,
                          rssi,
@@ -465,12 +480,7 @@ if __name__ == "__main__":
   if args.exportcsv:
     exportCsv(args)
 
-  printDebug('Debugging is enabled.')
-
-  if args.interface == '':
-    print('We need a --interface to work with!')
-    parser.print_help()
-    exit(1)
+  logger('Loglevel is: ' + str(args.loglevel),1)
 
   Gps = GPS()
   Gps.waitForLock()    # Don't take off until we get a lock.
