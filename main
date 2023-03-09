@@ -3,6 +3,7 @@
 from datetime import datetime, timezone
 from dateutil import tz
 from scapy.all import *
+from time import sleep
 from threading import Thread
 from pprint import pprint
 import atexit
@@ -12,16 +13,34 @@ import dateutil.parser
 import gps
 import os
 import sqlite3
-import time
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--interface", default='',  help="Interface of choice")
-parser.add_argument("--nomanagement", default=False, action='store_true', help="Assume another program is already handling int setup/restoration and channel switching. We're just along for the ride.")
-parser.add_argument("--importcsv", default='', help="CSV file to import")
-parser.add_argument("--exportcsv", default='', help="CSV filename to export with. If --google used this is a basename and CSVs get saved to your CWD")
-parser.add_argument("--google", default='', action='store_true', help="Break CSV export into multiple files of 2000 data point each. For Google's 'My Maps' which has a 2000-per-csv limit.")
-parser.add_argument("--skipgps", default='', action='store_true', help="Don't wait for GPS info. For developing this script without a GPS present.")
-parser.add_argument("--debug", default='', action='store_true', help="Makes the script print more during runtime.")
+
+parser.add_argument("--interface",
+                      default='',
+                      help="Interface of choice")
+parser.add_argument("--nomanagement",
+                      default=False,
+                      action='store_true', 
+                      help="Assume another program is already handling int setup/restoration and channel switching. We're just along for the ride.")
+parser.add_argument("--importcsv",
+                      default='', 
+                      help="CSV file to import")
+parser.add_argument("--exportcsv",
+                      default='', 
+                      help="CSV filename to export with. If --google used this is a basename and CSVs get saved to your CWD")
+parser.add_argument("--google",
+                      default='',
+                      action='store_true', 
+                      help="Break CSV export into multiple files of 2000 data point each. For Google's 'My Maps' which has a 2000-per-csv limit.")
+parser.add_argument("--skipgps",
+                      default='', 
+                      action='store_true', 
+                      help="Don't wait for GPS info. For developing this script without a GPS present.")
+parser.add_argument("--debug",
+                      default='',
+                      action='store_true',
+                      help="Makes the script print more during runtime.")
 
 args = parser.parse_args()
 
@@ -32,23 +51,170 @@ args = parser.parse_args()
 #  \____|_|\__,_|___/___/\___||___/
 #
 
+class GPS(): # Generate GPS data for other threads.
+  def __init__(self):
+    self.gpsData = { "gpsTimestamp": None, "gpsTimestampAge": None, "Longitude": None, "Latitude": None } # Init gpsData
+      # Longitude/Latitude   The location data received at gpsTimestamp.
+      # gpsTimestamp         The timestamp with Lon / Lat from GPS
+      # gpsTimestampAge      The difference in seconds between your host's time and the gpsTimestamp stamp.
+      #                      Useful to know if your GPS has lost its lock when writing results.
+
+    try:
+      print('Initializing GPS...')
+      self.session = gps.gps(mode=gps.WATCH_ENABLE)
+    except ConnectionRefusedError:
+      print('Local gpsd refused our connection. Is it running?')
+      print('If you are debugging with no GPS, you can launch again using --skipgps')
+      exit(1)
+    except Exception as e:
+      print('Something else went wrong trying to speak with gpsd:')
+      print(e)
+      exit(1)
+    finally:
+      print('Initialized.')
+
+  def readGps(self):
+    time=lat=lon=None
+
+      # Do initial read from gpsd
+    self.session.read()
+
+      # If invalid TPV result, keep trying until we get one...
+      # May be inappropriate to gpsd.
+    while not (gps.MODE_SET & self.session.valid):
+      self.session.read() # Try reading from gpsd.
+
+
+      # Capture GPS state for data purposes.
+      # Not Yet Implemented!!!!!!!!
+    #gpsFixStatus = ("Invalid", "NO_FIX", "2D", "3D")[session.fix.mode]
+
+    if gps.TIME_SET & self.session.valid:
+      time = self.session.fix.time
+
+    if ((gps.isfinite(self.session.fix.latitude) and gps.isfinite(self.session.fix.longitude))):
+      lat = self.session.fix.latitude
+      lon = self.session.fix.longitude
+
+    if time and lat and lon:
+      self.gpsData["gpsTimestamp"] = time
+      self.gpsData["Latitude"]     = lat
+      self.gpsData["Longitude"]    = lon
+
+    if self.gpsData['gpsTimestamp']: # Update staleness periodically
+      gpsTime = datetime.strptime(str(self.gpsData['gpsTimestamp']),'%Y-%m-%dT%H:%M:%S.%f%z')
+      gpsTime = gpsTime.replace(tzinfo=tz.tzutc()).astimezone(tz=tz.tzlocal())
+      localTime = datetime.now().astimezone()
+      self.gpsData["gpsTimestampAge"] = ((localTime-gpsTime).total_seconds())
+
+  def _gpsThread(self):
+    while True:
+      self.readGps()
+
+  def startGpsThread(self):
+    try:
+      self.gpsThread = Thread(target=self._gpsThread)
+      self.gpsThread.daemon = True
+      self.gpsThread.start()
+    finally:
+      print('GPS Data thread started.')
+
+  def waitForLock(self):
+    if args.skipgps:
+      self.gpsData['gpsTimestamp']    = 'NA';
+      self.gpsData['gpsTimestampAge'] = 'NA';
+      self.gpsData['Latitude']        = 0;
+      self.gpsData['Longitude']       = 0;
+      print("Skipping GPS wait and set dummy values: " + str(list(gpsData.values())))
+    else:
+      print('Waiting for GPS lock...')
+    
+      while not self.gpsData['gpsTimestamp']: # Wait for data
+        self.readGps()
+
+      print("Got a lock: " + str(list(self.gpsData.values())))
+
+
+
 class Database: # Our database object
   def __init__(self, databaseFile):
     try:
       self.con = sqlite3.connect(databaseFile,check_same_thread=False)
       self.cur = self.con.cursor()
-        # Create our database and a duplicate for evicted(Deemed less accurate) datapoints
-      self.exec("create table if not exists wifi \
-             (bssid VARCHAR(17),ssid,channel INT,security TEXT,rssi INT,timestamp INT,timestampAge REAL,lat REAL,lon REAL, unique (bssid))")
-      self.exec("create table if not exists wifi_evicted \
-             (bssid VARCHAR(17),ssid,channel INT,security TEXT,rssi INT,timestamp INT,timestampAge REAL,lat REAL,lon REAL)")
+        # Create our database and tables, including a secondary table to evict old data.
+
+        # Dict-powered DB creation. Probably a stupid idea
+      schema = {  "columns": {
+                    "bssid": {
+                      "type": "VARCHAR(17)"
+                    },
+                    "ssid": {
+                      "type": ""
+                     },
+                    "channel": {
+                      "type": "INT"
+                    },
+                    "security": {
+                      "type": "TEXT"
+                    },
+                    "rssi": {
+                      "type": "INT"
+                    },
+                    "timestamp": {
+                      "type": "INT"
+                    },
+                    "timestampAge": {
+                      "type": "REAL"
+                    },
+                    "lat": {
+                      "type": "REAL"
+                    },
+                    "lon": {
+                      "type": "REAL"
+                    }
+                  },
+                 "tables": {
+                   "wifi": {
+                     "tableSpecial": "unique (bssid)"
+                   },
+                   "wifi_evicted": {
+                     "tableSpecial": "" 
+                   }
+                 }
+               }
+
+      for table in list(schema['tables'].keys()): # Build the database
+        tableQuery = "create table if not exists %s" %(table)
+
+        columnCount = len(schema['columns'])
+        counter = 1
+
+        columnQuery = ''
+        for column in schema['columns']:
+          columnQuery += column + ' ' + schema['columns'][column]['type']
+          if counter < 2:
+            columnQuery = ' ' + columnQuery
+          if counter < columnCount:
+            columnQuery += ', '
+          else:
+            columnQuery += ' '
+
+          counter += 1
+
+        if schema['tables'][table]['tableSpecial']:
+          columnQuery += ', ' + schema['tables'][table]['tableSpecial']
+
+        tableQuery += ' (' + columnQuery + ')'
+        self.exec(tableQuery)
+
     except Exception as e:
       print('Failed to prepare Database: ', e)
+      exit(1)
     finally:
       print('Database connected')
 
   def exec(self, query):
-    #printDebug('DEBUG: This is the query:' + query)
+    #printDebug('This is the query:' + query)
     self.cur.execute(query)
     self.con.commit()
 
@@ -96,8 +262,6 @@ class Database: # Our database object
         printDebug('Writing new point: ' + bssid + ' Staleness: ' + str(timestampAge))
         self.writePoint(bssid,ssid,rssi,channel,security,timestamp,timestampAge,lat,lon)
 
-
-
 # _____                 _   _
 #|  ___|   _ _ __   ___| |_(_) ___  _ __  ___
 #| |_ | | | | '_ \ / __| __| |/ _ \| '_ \/ __|
@@ -139,7 +303,7 @@ def importCsv(args):
               print('Failed to convert date...')
               gpsTimestamp = row['gpsTimestamp']
 
-          db.handleWifiPoint(row['bssid'],
+          Db.handleWifiPoint(row['bssid'],
                              row['ssid'],
                              row['rssi'],
                              row['channel'],
@@ -182,13 +346,13 @@ def writeFile(filename,headers,items):
 
 def exportCsv(args):
   filename = args.exportcsv
-  headerQuery = db.execFetchAll('PRAGMA table_info(wifi)')
+  headerQuery = Db.execFetchAll('PRAGMA table_info(wifi)')
   headers = []
   for column in headerQuery: # Put headers together for the csv.
     headers.append(column[1])
 
     # Read out our data into memory
-  wifiQuery = db.execFetchAll('select * from wifi')
+  wifiQuery = Db.execFetchAll('select * from wifi')
 
   if args.google: # Limit each csv to 2000 points each.
     split = 2000
@@ -204,41 +368,6 @@ def exportCsv(args):
     writeFile(filename,headers,wifiQuery)
 
   exit(0)
-
-
-def gpsThread(): # Generate GPS data for other threads.
-  session = gps.gps(mode=gps.WATCH_ENABLE)
-  global gpsData
-
-  while True:
-    while 0 == session.read():
-      if not (gps.MODE_SET & session.valid): continue
-
-      time=lat=lon=None
-
-      if gps.TIME_SET & session.valid:
-        time = session.fix.time
-      else: time = None
-
-      if ((gps.isfinite(session.fix.latitude) and gps.isfinite(session.fix.longitude))):
-        lat = session.fix.latitude
-        lon = session.fix.longitude
-      else:
-        lat=lon=None
-
-      if time and lat and lon:
-        gpsData["gpsTimestamp"] = time
-        gpsData["Latitude"]     = lat
-        gpsData["Longitude"]    = lon
-
-      # Update drift seconds on stored gpsData
-      if gpsData['gpsTimestamp']:
-        gpsTime = datetime.strptime(str(gpsData['gpsTimestamp']),'%Y-%m-%dT%H:%M:%S.%f%z')
-        gpsTime = gpsTime.replace(tzinfo=tz.tzutc()).astimezone(tz=tz.tzlocal())
-        localTime = datetime.now().astimezone()
-        gpsData["gpsTimestampAge"] = ((localTime-gpsTime).total_seconds())
-
-    time.sleep(1) # One second sleep between polls should be fine. Make this a variable however. And add arguments to the script.
 
 def processPacket(packet):
   try:
@@ -257,15 +386,15 @@ def processPacket(packet):
       # If seen: Compare RSSI, GPS Coordinates if better.
       
       #printDebug('Processing: ',bssid, ssid, channel, security,rssi)
-      db.handleWifiPoint(bssid,
+      Db.handleWifiPoint(bssid,
                          ssid,
                          rssi,
                          channel,
                          security,
-                         gpsData['gpsTimestamp'],
-                         gpsData['gpsTimestampAge'],
-                         gpsData['Latitude'],
-                         gpsData['Longitude'])
+                         Gps.gpsData['gpsTimestamp'],
+                         Gps.gpsData['gpsTimestampAge'],
+                         Gps.gpsData['Latitude'],
+                         Gps.gpsData['Longitude'])
 
   except Exception as e: # Ignore busted packets
     print('Packet issue: ' + str(e))
@@ -315,22 +444,7 @@ def channelSwitcher():
   while True:
     executeCmd('iwconfig {interface} channel {ch}'.format(interface = args.interface, ch = ch))
     ch = ch % 14 + 1
-    time.sleep(0.25)
-
-def waitForGPSLock(args):
-  if args.skipgps:
-    gpsData['gpsTimestamp']    = 'NA';
-    gpsData['gpsTimestampAge'] = 'NA';
-    gpsData['Latitude']        = 0;
-    gpsData['Longitude']       = 0;
-    print("Skipping GPS wait and setting dummy values: " + str(list(gpsData.values())))
-  else:
-    print('Waiting for GPS lock...')
-    while True:
-      time.sleep(1)
-      if gpsData["gpsTimestamp"] is not None:
-        print("Got it: " + str(list(gpsData.values())))
-        break
+    sleep(0.25)
 
 #  ____
 # / ___| ___
@@ -343,7 +457,7 @@ if __name__ == "__main__":
   scriptRoot = os.path.dirname(os.path.realpath(__file__))
   databaseFile = scriptRoot + '/wifi.db'
 
-  db = Database(databaseFile)
+  Db = Database(databaseFile)
 
   if args.importcsv:
     importCsv(args)
@@ -358,18 +472,10 @@ if __name__ == "__main__":
     parser.print_help()
     exit(1)
 
-  # Init gpsData
-  gpsData = { "gpsTimestamp": None, "gpsTimestampAge": None, "Longitude": None, "Latitude": None }
-  # Longitude/Latitude   The location data received at gpsTimestamp.
-  # gpsTimestamp     The timestamp with that Lon / Lat from GPS
-  # gpsTimestampAge  The difference in seconds between your host's time and the gpsTimestamp stamp.
-  #                      Useful to know if your GPS has lost its lock when writing results.
+  Gps = GPS()
+  Gps.waitForLock()    # Don't take off until we get a lock.
 
-  gpsThread = Thread(target=gpsThread)
-  gpsThread.daemon = True
-  gpsThread.start()
-
-  waitForGPSLock(args)
+  Gps.startGpsThread() # Get started
 
   manageInt(args,'monitor')
   atexit.register(cleanup)
