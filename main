@@ -194,10 +194,10 @@ def exportCsv(args):
     split = 2000
     wifiQueryCount = len(wifiQuery) - 1
     iter = 0
-    while iter < wifiQueryCount + split:
+    while iter < wifiQueryCount:
+      print(str(iter) + ':' + str(wifiQueryCount+2000))
         # Insert an incrementing 'split' number into the desired filename before the suffix for visibility.
       splitFilename = str('.'.join(filename.split('.')[:-1]) + '-' + str(iter) + '.' + filename.split('.')[-1])
-      print(str(iter) + ':' + str(iter+split))
       writeFile(splitFilename,headers,wifiQuery[iter:iter+split])
       iter = iter + split
   else: # Just write the csv filename specified.
