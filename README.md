@@ -6,11 +6,11 @@ Complete with the ability to export or import existing data as CSV for Google "M
 
 ## Usage
 
-1. Connect your GPS module of choice and ensure gpsd is active.
+1. Connect your GPS module of choice and ensure gpsd is active. (The socket usually takes care of this)
 
-2. Put your network interface of choice into monitor mode (Automatic prep planned soon)
+2. At a minimum, call `wifiGeolocation/main --interface wlpXxYy`
 
-3. At a minimum, call `wifiGeolocation/main --interface wlpXxYy`
+3. Wait for a GPS lock and the database will start writing.
 
 ### Flags
 
